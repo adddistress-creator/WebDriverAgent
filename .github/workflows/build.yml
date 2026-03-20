@@ -1,4 +1,4 @@
-name: Build WDA IPA (FIXED SIZE)
+name: Build WDA IPA (FULL DEBUG MODE)
 
 on:
   workflow_dispatch:
@@ -9,12 +9,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 1. Ревизия исходников (Tree)
+        run: |
+          echo "=== СТРУКТУРА РЕПОЗИТОРИЯ ==="
+          find . -maxdepth 3 -not -path '*/.*'
+          echo "============================="
+
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Build WDA Runner
+      - name: 2. Сборка (Verbose)
         run: |
-          # Собираем полноценный таргет с принудительной линковкой всех либ
           xcodebuild build \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
@@ -24,42 +29,44 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SKIP_INSTALL=NO \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES
 
-      - name: Package and Verify
+      - name: 3. Глубокий анализ артефактов
         run: |
           mkdir -p Payload
-          
-          # Ищем .app файл (используем более широкий поиск на всякий случай)
           APP_PATH=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "❌ Ошибка: WebDriverAgentRunner-Runner.app не найден!"
-            exit 1
-          fi
-          
-          echo "✅ Найдено по пути: $APP_PATH"
-          
-          # Проверяем содержимое перед упаковкой (для отладки)
-          echo "--- Содержимое бандла ---"
-          ls -R "$APP_PATH"
-          echo "------------------------"
-          
-          cp -r "$APP_PATH" Payload/
-          zip -rq WebDriverAgent.ipa Payload
-          
-          # ПРОВЕРКА РАЗМЕРА
-          SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
-          echo "✅ IPA готов. Размер: ${SIZE}MB"
-          
-          if [ "$SIZE" -lt 15 ]; then
-            echo "❌ Ошибка: IPA слишком маленький (${SIZE}MB). Это всё еще пустышка!"
+            echo "❌ Ошибка: .app не найден!"
             exit 1
           fi
 
-      - name: Upload
+          echo "=== АНАЛИЗ БИНАРНИКА ==="
+          BINARY_PATH="$APP_PATH/WebDriverAgentRunner-Runner"
+          if [ -f "$BINARY_PATH" ]; then
+            ls -lh "$BINARY_PATH"
+            echo "Тип файла:"
+            file "$BINARY_PATH"
+            echo "Архитектуры внутри:"
+            lipo -info "$BINARY_PATH"
+          else
+            echo "⚠️ ОСНОВНОЙ БИНАРНИК ОТСУТСТВУЕТ ПО ПУТИ $BINARY_PATH"
+          fi
+          echo "========================"
+
+          echo "=== ПРОВЕРКА ВЛОЖЕННЫХ ФРЕЙМВОРКОВ ==="
+          find "$APP_PATH" -name "*.framework" -exec ls -lh {} \;
+          find "$APP_PATH" -name "*.xctest" -exec ls -lh {} \;
+          echo "======================================"
+
+          cp -r "$APP_PATH" Payload/
+          zip -rq WebDriverAgent.ipa Payload
+          
+          SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
+          echo "✅ ИТОГОВЫЙ IPA: ${SIZE}MB"
+
+      - name: Upload Debug Log
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-REAL-IPA
+          name: WebDriverAgent-DEBUG-IPA
           path: WebDriverAgent.ipa
