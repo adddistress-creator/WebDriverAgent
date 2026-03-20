@@ -1,10 +1,10 @@
-name: Build WDA IPA
+name: Build and Sign WDA
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-wda:
+  build-sign:
     runs-on: macos-14
     steps:
       - name: Checkout WDA
@@ -16,57 +16,100 @@ jobs:
       - name: Setup Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Install npm deps (needed by fetch script)
-        run: |
-          cd WebDriverAgent
-          npm install
+      - name: Install npm deps
+        run: cd WebDriverAgent && npm install
 
-      - name: Try fetch prebuilt WDA
-        id: fetch
+      - name: Add Apple ID to keychain
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          cd WebDriverAgent
-          node Scripts/fetch-prebuilt-wda.mjs 2>&1
-          IPA=$(find . -name "*.ipa" | head -n 1)
-          if [ -n "$IPA" ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-            echo "ipa_path=$IPA" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
-          fi
+          # Create keychain
+          security create-keychain -p "build" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "build" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
 
-      - name: Build from source
-        if: steps.fetch.outputs.found != 'true'
+          # Add Apple ID credentials to keychain
+          xcrun altool --store-password-in-keychain-item "WDA_BUILD" \
+            -u "$APPLE_ID" -p "$APPLE_PASSWORD" 2>/dev/null || true
+
+      - name: Register device + get provisioning profile via Fastlane
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          FASTLANE_USER: ${{ secrets.APPLE_ID }}
+          FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          gem install fastlane --no-document -q
+
+          # Register iPhone
+          fastlane run register_device \
+            name:"iPhone12mini" \
+            udid:"00008101-001638D81468001E" \
+            username:"$APPLE_ID" \
+            password:"$APPLE_PASSWORD"
+
+          # Get development cert
+          fastlane cert development \
+            --username "$APPLE_ID" \
+            --output_path "." \
+            --keychain_path "$(pwd)/build.keychain" \
+            --keychain_password "build"
+
+          # Get provisioning profile
+          fastlane sigh \
+            --username "$APPLE_ID" \
+            --app_identifier "io.wda.runner" \
+            --development \
+            --output_path "." \
+            --filename "WDA.mobileprovision"
+
+          echo "=== Certs ==="
+          ls -la *.cer 2>/dev/null || true
+          echo "=== Profiles ==="
+          ls -la *.mobileprovision 2>/dev/null || true
+          echo "=== Signing identities ==="
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Build and sign WDA
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
         run: |
           cd WebDriverAgent
           mkdir -p Resources/WebDriverAgent.bundle
+
+          # Get signing identity
+          IDENTITY=$(security find-identity -v -p codesigning ~/../../build.keychain | grep "iPhone" | head -1 | awk -F'"' '{print $2}')
+          echo "Signing identity: $IDENTITY"
+
+          # Get provisioning profile UUID
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i ~/../../WDA.mobileprovision 2>/dev/null) 2>/dev/null || echo "")
+          echo "Profile UUID: $PROFILE_UUID"
+
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner-nodebug \
             -destination 'generic/platform=iOS' \
             -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGN_IDENTITY="$IDENTITY" \
+            PROVISIONING_PROFILE="$PROFILE_UUID" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="$(echo $IDENTITY | grep -oE '\([A-Z0-9]+\)' | tr -d '()')"
 
-      - name: Package IPA from build
-        if: steps.fetch.outputs.found != 'true'
+      - name: Package IPA
         run: |
           cd WebDriverAgent
-          APP=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          APP=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           echo "App: $APP"
           mkdir -p Payload
           cp -r "$APP" Payload/
-          zip -rq WebDriverAgent.ipa Payload
-          ls -lh WebDriverAgent.ipa
-
-      - name: Collect IPA
-        run: |
-          IPA=$(find WebDriverAgent -name "*.ipa" | head -n 1)
-          echo "IPA: $IPA"
-          cp "$IPA" final.ipa
-          ls -lh final.ipa
+          zip -rq WDA-signed.ipa Payload
+          ls -lh WDA-signed.ipa
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent
-          path: final.ipa
+          name: WDA-Signed
+          path: WebDriverAgent/WDA-signed.ipa
