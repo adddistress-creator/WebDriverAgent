@@ -1,4 +1,4 @@
-name: Build WDA IPA
+name: Build WDA IPA (Official Standard)
 
 on:
   workflow_dispatch:
@@ -7,50 +7,33 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Clean and Build
+      - name: Build WDA
         run: |
-          # Очистка старых билдов, если они были
-          xcodebuild clean -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner
-          
-          # Сама сборка
-          xcodebuild build \
+          # Используем официальный подход clean + build-for-testing
+          xcodebuild clean build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            ONLY_ACTIVE_ARCH=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            CODE_SIGNING_REQUIRED=NO
 
-      - name: Prepare Payload
+      - name: Package for Real Device
         run: |
           mkdir -p Payload
-          # Находим приложение. Этот путь — стандарт для Appium WDA
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "❌ Приложение не найдено! Проверь логи сборки выше."
-            exit 1
-          fi
-          
-          cp -r "$APP_PATH" Payload/
-          
-          # Упаковываем в IPA
+          # Инструкция требует именно этот .app файл
+          find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d -exec cp -r {} Payload/ \;
           zip -rq WebDriverAgent.ipa Payload
-          
-          # Финальная проверка размера (должна быть 20MB+)
           echo "✅ IPA готов. Размер: $(ls -lh WebDriverAgent.ipa | awk '{print $5}')"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-Appium-Release
+          name: WDA_Official_Build
           path: WebDriverAgent.ipa
