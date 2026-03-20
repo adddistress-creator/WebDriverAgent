@@ -8,8 +8,9 @@ jobs:
     runs-on: macos-14
     env:
       FASTLANE_USER: ${{ secrets.APPLE_ID }}
-      FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       FASTLANE_DONT_STORE_PASSWORD: "1"
+      FASTLANE_SKIP_2FA_UPGRADE: "1"
 
     steps:
       - name: Checkout WDA
@@ -40,20 +41,16 @@ jobs:
             name:"iPhone12mini" \
             udid:"00008101-001638D81468001E"
 
-      - name: Get certificate and profile
+      - name: Get cert and profile
         run: |
-          # Download development certificate
           fastlane cert development \
             --output_path "." \
             --keychain_path "$HOME/Library/Keychains/build.keychain-db" \
             --keychain_password "build123"
 
-          echo "=== Certs ==="
-          ls -la *.cer 2>/dev/null || echo "no cer"
           echo "=== Identities ==="
           security find-identity -v -p codesigning
 
-          # Get provisioning profile
           fastlane sigh \
             --app_identifier "io.wda.runner" \
             --development \
@@ -61,7 +58,7 @@ jobs:
             --filename "WDA.mobileprovision"
 
           echo "=== Profile ==="
-          ls -la WDA.mobileprovision 2>/dev/null || echo "no profile"
+          ls -la WDA.mobileprovision
 
       - name: Build WDA
         run: |
@@ -76,7 +73,7 @@ jobs:
           result = subprocess.run(['security', 'cms', '-D', '-i', '../WDA.mobileprovision'], capture_output=True)
           data = plistlib.loads(result.stdout)
           print(data['UUID'])
-          " 2>/dev/null || echo "")
+          ")
           echo "Profile UUID: $PROFILE_UUID"
 
           TEAM=$(security find-identity -v -p codesigning | grep "iPhone" | head -1 | grep -oE '\([A-Z0-9]{10}\)' | tr -d '()')
@@ -97,7 +94,6 @@ jobs:
         run: |
           cd WebDriverAgent
           APP=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "App: $APP"
           mkdir -p Payload
           cp -r "$APP" Payload/
           zip -rq WDA-signed.ipa Payload
