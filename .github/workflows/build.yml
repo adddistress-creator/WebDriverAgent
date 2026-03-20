@@ -1,4 +1,4 @@
-name: Build WDA IPA (Official Standard)
+name: Build WDA IPA (FIXED SIZE)
 
 on:
   workflow_dispatch:
@@ -12,10 +12,10 @@ jobs:
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Build WDA
+      - name: Build WDA Runner
         run: |
-          # Используем официальный подход clean + build-for-testing
-          xcodebuild clean build-for-testing \
+          # Используем просто build, это создаст полноценное приложение
+          xcodebuild build \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
@@ -24,16 +24,31 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      - name: Package for Real Device
+      - name: Package and Verify
         run: |
           mkdir -p Payload
-          # Инструкция требует именно этот .app файл
-          find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d -exec cp -r {} Payload/ \;
+          # Ищем .app файл во всей папке build
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Ошибка: WebDriverAgentRunner-Runner.app не найден!"
+            exit 1
+          fi
+          
+          cp -r "$APP_PATH" Payload/
           zip -rq WebDriverAgent.ipa Payload
-          echo "✅ IPA готов. Размер: $(ls -lh WebDriverAgent.ipa | awk '{print $5}')"
+          
+          # ПРОВЕРКА РАЗМЕРА
+          SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
+          echo "✅ IPA готов. Размер: ${SIZE}MB"
+          
+          if [ "$SIZE" -lt 15 ]; then
+            echo "❌ Ошибка: IPA слишком маленький (${SIZE}MB). Это пустышка!"
+            exit 1
+          fi
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: WDA_Official_Build
+          name: WebDriverAgent-REAL-IPA
           path: WebDriverAgent.ipa
