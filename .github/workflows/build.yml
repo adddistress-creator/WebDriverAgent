@@ -1,4 +1,4 @@
-name: WDA Standalone Ultimate (Hard Patch)
+name: Build WDA IPA
 
 on:
   workflow_dispatch:
@@ -16,85 +16,35 @@ jobs:
       - name: Setup Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Hard Patch Project (Bundle to App)
+      - name: Bootstrap WDA
         run: |
           cd WebDriverAgent
-          
-          # 1. Меняем тип продукта с тестового бандла на приложение прямо в конфиге проекта
-          sed -i '' 's/com.apple.product-type.bundle.unit-test/com.apple.product-type.application/g' WebDriverAgent.xcodeproj/project.pbxproj
-          sed -i '' 's/wrapper.cfbundle/wrapper.application/g' WebDriverAgent.xcodeproj/project.pbxproj
-          
-          # 2. Добавляем конструктор для автозапуска сервера при загрузке
-          echo "static void __attribute__((constructor)) initialize(void) {
-              NSLog(@\"🚀 WebDriverAgent Standalone System Booted!\");
-          }" >> WebDriverAgentRunner/WebDriverAgentRunner.m
+          mkdir -p Resources/WebDriverAgent.bundle
+          ./Scripts/bootstrap.sh -d
 
-      - name: Build Standalone Executable
+      - name: Build WDA
         run: |
           cd WebDriverAgent
-          
-          # Собираем с флагами, которые превращают бинарник в исполняемый (mh_execute)
-          xcodebuild build \
+          xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
-            -configuration Release \
             -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            MACH_O_TYPE=mh_execute \
-            PRODUCT_NAME="WebDriverAgentRunner" \
-            OTHER_LDFLAGS="-all_load -ObjC -framework XCTest" \
-            GCC_PREPROCESSOR_DEFINITIONS='$(inherited) FB_RETAIN_CYCLE_DETECTOR_ENABLED=0' \
-            | xcpretty
+            CODE_SIGNING_REQUIRED=NO
 
-      - name: Create IPA & 500% Info Analysis
+      - name: Create IPA
         run: |
           cd WebDriverAgent
+          APP_PATH=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          echo "App path: $APP_PATH"
           mkdir -p Payload
-          
-          # Ищем наше новое приложение (оно теперь должно называться просто .app)
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner.app" -type d | head -n 1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "❌ Ошибка: Приложение не найдено! Пробую искать любой .app..."
-            APP_PATH=$(find build/Build/Products/Release-iphoneos -name "*.app" -type d | head -n 1)
-          fi
-          
-          echo "✅ Используемый путь: $APP_PATH"
           cp -r "$APP_PATH" Payload/
-
-          echo -e "\n\n======================================================="
-          echo "🔍 ГЛУБОКИЙ АНАЛИЗ (STANDALONE CHECK)"
-          echo "======================================================="
-          
-          # Ищем исполняемый файл внутри бандла
-          EXECUTABLE=$(find Payload -maxdepth 2 -type f -perm +111 | head -n 1)
-          
-          echo "1. ИМЯ ФАЙЛА И ПУТЬ:"
-          echo "$EXECUTABLE"
-          
-          echo -e "\n2. ВЕС БИНАРНИКА (Ожидаем > 5MB):"
-          ls -lh "$EXECUTABLE"
-          
-          echo -e "\n3. АРХИТЕКТУРА:"
-          lipo -info "$EXECUTABLE"
-          
-          echo -e "\n4. КЛЮЧЕВЫЕ СИМВОЛЫ (СЕРВЕР ВНУТРИ?):"
-          nm "$EXECUTABLE" | grep -E "FB|XCUI" | head -n 20 || echo "❌ ПУСТО! Код не вшился."
-          
-          echo -e "\n5. BUNDLE ID:"
-          plutil -p "$APP_PATH/Info.plist" | grep "CFBundleIdentifier"
-          echo "=======================================================\n\n"
-
-          # Упаковка
           zip -rq WebDriverAgent.ipa Payload
-          
-          echo "=== ИТОГ === "
           ls -lh WebDriverAgent.ipa
 
-      - name: Upload Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-Standalone-Ultimate
+          name: WebDriverAgent
           path: WebDriverAgent/WebDriverAgent.ipa
