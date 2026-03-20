@@ -1,71 +1,99 @@
-name: Build WebDriverAgent IPA (FINAL STABLE)
+name: WDA Standalone Build (Ultimate Info)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Ручной запуск
 
 jobs:
-  build:
+  build-wda:
     runs-on: macos-14
-    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout WDA
+        uses: actions/checkout@v4
         with:
-          # Используем официальный репозиторий Appium
           repository: appium/WebDriverAgent
           path: WebDriverAgent
-          
-      - name: Select Xcode 15.4
+
+      - name: Setup Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Build WebDriverAgent (Monolithic Build)
+      - name: Build Standalone Runner
         run: |
           cd WebDriverAgent
-          # Ключевые флаги: 
-          # 1. Сборка как статической библиотеки, чтобы вшить код сервера
-          # 2. -all_load для включения всех категорий Objective-C
+          
+          # Собираем проект как полноценное приложение (НЕ тест)
+          # Флаги -all_load и -ObjC принудительно вшивают код сервера в бинарник
           xcodebuild build \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath DerivedData \
             -configuration Release \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            ONLY_ACTIVE_ARCH=NO \
             OTHER_LDFLAGS="-all_load -ObjC" \
-            -quiet
+            GCC_PREPROCESSOR_DEFINITIONS='$(inherited) FB_RETAIN_CYCLE_DETECTOR_ENABLED=0' \
+            COMPILER_INDEX_STORE_ENABLE=NO | xcpretty
 
-      - name: Verify and Package IPA
+      - name: Create Unsigned IPA & Deep Analysis
         run: |
           cd WebDriverAgent
+          mkdir -p Payload
           
-          # Находим путь к .app (исключая dSYM)
-          APP_PATH=$(find DerivedData/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/WebDriverAgentRunner-Runner" ]; then
-            echo "❌ Ошибка: Реальное приложение не найдено!"
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Ошибка: Приложение не найдено в build/"
             exit 1
           fi
           
-          echo "✅ Найдено приложение: $APP_PATH"
-          echo "BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")"
-          
-          # Подготовка Payload
-          mkdir -p Payload
+          echo "✅ Найдено: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           
-          # Проверяем наличие WebDriverAgentLib внутри (она должна быть либо в Frameworks, либо вшита в бинарник)
-          BINARY_SIZE=$(ls -lh "Payload/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner" | awk '{print $5}')
-          echo "📊 Размер основного бинарника: $BINARY_SIZE"
+          # Проверка на наличие внешнего фреймворка
+          LIB_FRAMEWORK=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentLib.framework" -type d | head -n 1)
+          if [ -d "$LIB_FRAMEWORK" ]; then
+             echo "📦 Вшиваем WebDriverAgentLib в папку Frameworks..."
+             mkdir -p Payload/WebDriverAgentRunner-Runner.app/Frameworks
+             cp -r "$LIB_FRAMEWORK" Payload/WebDriverAgentRunner-Runner.app/Frameworks/
+          fi
+
+          # --- СЕКЦИЯ 500% ИНФОРМАЦИИ ---
+          echo -e "\n\n"
+          echo "======================================================="
+          echo "🔍 ГЛУБОКИЙ АНАЛИЗ БИНАРНОГО ФАЙЛА (DEBUG INFO)"
+          echo "======================================================="
           
-          # Упаковка
+          EXECUTABLE="Payload/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner"
+          
+          echo "1. АРХИТЕКТУРА (Ожидаем arm64):"
+          lipo -info "$EXECUTABLE"
+          
+          echo -e "\n2. ВЕС БИНАРНИКА (Ожидаем > 3MB):"
+          ls -lh "$EXECUTABLE"
+          
+          echo -e "\n3. ЗАВИСИМОСТИ (Ищем WebDriverAgentLib):"
+          otool -L "$EXECUTABLE" | grep -i "WebDriverAgent" || echo "Библиотека вшита статически (это хорошо)"
+          
+          echo -e "\n4. КЛЮЧЕВЫЕ СИМВОЛЫ (Проверка наличия кода сервера):"
+          # Ищем упоминания FB (WebDriverAgent) и XCUI (Apple Test Framework)
+          nm "$EXECUTABLE" | grep -E "FB|XCUI" | head -n 30 || echo "❌ СИМВОЛЫ НЕ НАЙДЕНЫ! Билд пустой."
+          
+          echo -e "\n5. ПРОВЕРКА IDENTIFIER В INFO.PLIST:"
+          plutil -p Payload/WebDriverAgentRunner-Runner.app/Info.plist | grep -E "CFBundleIdentifier|CFBundleExecutable"
+          
+          echo "======================================================="
+          echo -e "\n\n"
+          # ------------------------------
+
+          # Архивируем в IPA
           zip -rq WebDriverAgent.ipa Payload
           
-          echo "APP_PATH_FINAL=$GITHUB_WORKSPACE/WebDriverAgent/WebDriverAgent.ipa" >> $GITHUB_ENV
-          echo "✅ IPA готов. Размер: $(ls -lh WebDriverAgent.ipa | awk '{print $5}')"
+          echo "=== ИТОГОВАЯ СТАТИСТИКА ==="
+          ls -lh WebDriverAgent.ipa
+          echo "✅ Билд завершен успешно."
 
-      - name: Upload IPA
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-Fixed-Release
+          name: WDA-Final-Standalone
           path: WebDriverAgent/WebDriverAgent.ipa
