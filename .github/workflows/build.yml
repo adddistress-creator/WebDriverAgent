@@ -1,4 +1,4 @@
-name: Build WDA IPA (FULL DEBUG MODE)
+name: Build WDA IPA (FULL FIXED MODE)
 
 on:
   workflow_dispatch:
@@ -9,64 +9,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 1. Ревизия исходников (Tree)
-        run: |
-          echo "=== СТРУКТУРА РЕПОЗИТОРИЯ ==="
-          find . -maxdepth 3 -not -path '*/.*'
-          echo "============================="
-
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: 2. Сборка (Verbose)
+      - name: Build and Archive (IntegrationApp)
+        # Мы меняем схему на IntegrationApp, потому что это полноценное приложение-хост.
+        # Оно принудительно затягивает в себя WebDriverAgentLib.
         run: |
-          xcodebuild build \
+          xcodebuild archive \
             -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
+            -scheme IntegrationApp \
             -destination 'generic/platform=iOS' \
+            -archivePath build/WDA.xcarchive \
             -configuration Release \
-            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            SKIP_INSTALL=NO \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES
+            SKIP_INSTALL=NO
 
-      - name: 3. Глубокий анализ артефактов
+      - name: Prepare Payload and IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          # Берем скомпилированное приложение из архива
+          APP_PATH=$(find build/WDA.xcarchive/Products/Applications -name "*.app" -type d | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "❌ Ошибка: .app не найден!"
+            echo "❌ Ошибка: Приложение не найдено в архиве!"
             exit 1
           fi
-
-          echo "=== АНАЛИЗ БИНАРНИКА ==="
-          BINARY_PATH="$APP_PATH/WebDriverAgentRunner-Runner"
-          if [ -f "$BINARY_PATH" ]; then
-            ls -lh "$BINARY_PATH"
-            echo "Тип файла:"
-            file "$BINARY_PATH"
-            echo "Архитектуры внутри:"
-            lipo -info "$BINARY_PATH"
-          else
-            echo "⚠️ ОСНОВНОЙ БИНАРНИК ОТСУТСТВУЕТ ПО ПУТИ $BINARY_PATH"
-          fi
-          echo "========================"
-
-          echo "=== ПРОВЕРКА ВЛОЖЕННЫХ ФРЕЙМВОРКОВ ==="
-          find "$APP_PATH" -name "*.framework" -exec ls -lh {} \;
-          find "$APP_PATH" -name "*.xctest" -exec ls -lh {} \;
-          echo "======================================"
-
+          
+          echo "Копируем: $APP_PATH"
           cp -r "$APP_PATH" Payload/
+          
+          # Проверяем, что внутри есть бинарник и он не пустой
+          echo "=== СОДЕРЖИМОЕ ПРИЛОЖЕНИЯ ==="
+          ls -R Payload/*.app
+          echo "============================"
+          
           zip -rq WebDriverAgent.ipa Payload
           
           SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
           echo "✅ ИТОГОВЫЙ IPA: ${SIZE}MB"
 
-      - name: Upload Debug Log
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-DEBUG-IPA
+          name: WDA-IntegrationApp-IPA
           path: WebDriverAgent.ipa
