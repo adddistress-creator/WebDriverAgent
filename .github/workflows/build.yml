@@ -1,4 +1,4 @@
-name: Build WDA IPA (FULL FIXED MODE)
+name: Build WDA IPA (FORCE FULL MODE)
 
 on:
   workflow_dispatch:
@@ -12,46 +12,60 @@ jobs:
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Build and Archive (IntegrationApp)
-        # Мы меняем схему на IntegrationApp, потому что это полноценное приложение-хост.
-        # Оно принудительно затягивает в себя WebDriverAgentLib.
+      - name: Force Build WebDriverAgentRunner
         run: |
-          xcodebuild archive \
+          # Собираем WebDriverAgentRunner. 
+          # Мы используем 'build', но с флагом 'generic/platform=iOS', 
+          # чтобы он собрал полноценные бинарники arm64.
+          xcodebuild build \
             -project WebDriverAgent.xcodeproj \
-            -scheme IntegrationApp \
+            -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
-            -archivePath build/WDA.xcarchive \
             -configuration Release \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            SKIP_INSTALL=NO
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            OTHER_LDFLAGS="-all_load -ObjC"
 
-      - name: Prepare Payload and IPA
+      - name: Create IPA from Runner
         run: |
           mkdir -p Payload
-          # Берем скомпилированное приложение из архива
-          APP_PATH=$(find build/WDA.xcarchive/Products/Applications -name "*.app" -type d | head -n 1)
+          
+          # 1. Находим основной Runner-App
+          # Он обычно лежит в build/Build/Products/Release-iphoneos/
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
-            echo "❌ Ошибка: Приложение не найдено в архиве!"
-            exit 1
+             echo "❌ Ошибка: Runner.app не найден!"
+             exit 1
           fi
           
-          echo "Копируем: $APP_PATH"
+          echo "Найден путь: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           
-          # Проверяем, что внутри есть бинарник и он не пустой
-          echo "=== СОДЕРЖИМОЕ ПРИЛОЖЕНИЯ ==="
-          ls -R Payload/*.app
-          echo "============================"
-          
+          # 2. ВАЖНЫЙ ШАГ: В WebDriverAgentRunner код сервера часто лежит в WebDriverAgentLib.framework
+          # Мы проверяем, есть ли он там, если нет - ищем где он спрятан и закидываем в Payload
+          LIB_FRAMEWORK=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentLib.framework" -type d | head -n 1)
+          if [ -d "$LIB_FRAMEWORK" ]; then
+             echo "Копируем WebDriverAgentLib внутрь приложения..."
+             mkdir -p Payload/WebDriverAgentRunner-Runner.app/Frameworks
+             cp -r "$LIB_FRAMEWORK" Payload/WebDriverAgentRunner-Runner.app/Frameworks/
+          fi
+
+          # 3. Упаковка
           zip -rq WebDriverAgent.ipa Payload
           
           SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
           echo "✅ ИТОГОВЫЙ IPA: ${SIZE}MB"
 
+      - name: Check internal size
+        run: |
+          # Посмотрим, сколько весит сам бинарник внутри
+          ls -lh Payload/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner || true
+
       - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-IntegrationApp-IPA
+          name: WDA-Runner-Full-IPA
           path: WebDriverAgent.ipa
