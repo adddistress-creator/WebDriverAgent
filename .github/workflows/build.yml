@@ -16,20 +16,26 @@ jobs:
       - name: Setup Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Try fetch prebuilt WDA
-        id: fetch_prebuilt
+      - name: Install npm deps (needed by fetch script)
         run: |
           cd WebDriverAgent
-          node Scripts/fetch-prebuilt-wda.mjs 2>&1 && echo "PREBUILT=true" >> $GITHUB_OUTPUT || echo "PREBUILT=false" >> $GITHUB_OUTPUT
+          npm install
 
-      - name: Check fetched IPA
-        if: steps.fetch_prebuilt.outputs.PREBUILT == 'true'
+      - name: Try fetch prebuilt WDA
+        id: fetch
         run: |
-          find WebDriverAgent -name "*.ipa" 2>/dev/null
-          echo "Prebuilt fetch succeeded"
+          cd WebDriverAgent
+          node Scripts/fetch-prebuilt-wda.mjs 2>&1
+          IPA=$(find . -name "*.ipa" | head -n 1)
+          if [ -n "$IPA" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "ipa_path=$IPA" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Build from source (if prebuilt failed)
-        if: steps.fetch_prebuilt.outputs.PREBUILT != 'true'
+      - name: Build from source
+        if: steps.fetch.outputs.found != 'true'
         run: |
           cd WebDriverAgent
           mkdir -p Resources/WebDriverAgent.bundle
@@ -39,29 +45,28 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            HEADER_SEARCH_PATHS='$(SRCROOT)/PrivateHeaders' \
-            SWIFT_INCLUDE_PATHS='$(SRCROOT)/PrivateHeaders'
+            CODE_SIGNING_REQUIRED=NO
 
-      - name: Create IPA from build
-        if: steps.fetch_prebuilt.outputs.PREBUILT != 'true'
+      - name: Package IPA from build
+        if: steps.fetch.outputs.found != 'true'
         run: |
           cd WebDriverAgent
-          APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
-          echo "App: $APP_PATH"
+          APP=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          echo "App: $APP"
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
+          cp -r "$APP" Payload/
           zip -rq WebDriverAgent.ipa Payload
           ls -lh WebDriverAgent.ipa
 
-      - name: Find IPA (any source)
+      - name: Collect IPA
         run: |
           IPA=$(find WebDriverAgent -name "*.ipa" | head -n 1)
-          echo "Found IPA: $IPA"
-          cp "$IPA" WebDriverAgent.ipa
+          echo "IPA: $IPA"
+          cp "$IPA" final.ipa
+          ls -lh final.ipa
 
-      - name: Upload IPA
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: WebDriverAgent
-          path: WebDriverAgent.ipa
+          path: final.ipa
