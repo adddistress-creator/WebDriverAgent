@@ -1,10 +1,10 @@
-name: Build WDA IPA
+name: Diagnose WDA
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-wda:
+  diagnose:
     runs-on: macos-14
     steps:
       - name: Checkout WDA
@@ -13,38 +13,48 @@ jobs:
           repository: appium/WebDriverAgent
           path: WebDriverAgent
 
-      - name: Setup Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-
-      - name: Bootstrap WDA
+      - name: Collect all info
         run: |
           cd WebDriverAgent
-          mkdir -p Resources/WebDriverAgent.bundle
-          ./Scripts/bootstrap.sh -d
 
-      - name: Build WDA
-        run: |
-          cd WebDriverAgent
-          xcodebuild build-for-testing \
-            -project WebDriverAgent.xcodeproj \
-            -scheme WebDriverAgentRunner \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+          echo "===== XCODE VERSION ====="
+          xcodebuild -version
 
-      - name: Create IPA
-        run: |
-          cd WebDriverAgent
-          APP_PATH=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "App path: $APP_PATH"
-          mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -rq WebDriverAgent.ipa Payload
-          ls -lh WebDriverAgent.ipa
+          echo "===== AVAILABLE XCODE APPS ====="
+          ls /Applications/ | grep Xcode
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: WebDriverAgent
-          path: WebDriverAgent/WebDriverAgent.ipa
+          echo "===== REPO ROOT FILES ====="
+          ls -la
+
+          echo "===== SCRIPTS FOLDER ====="
+          ls Scripts/ 2>/dev/null || echo "NO Scripts/ folder"
+
+          echo "===== XCODEPROJ SCHEMES ====="
+          xcodebuild -project WebDriverAgent.xcodeproj -list 2>&1
+
+          echo "===== INFO.PLIST LOCATIONS ====="
+          find . -name "Info.plist" | grep -v build | grep -v ".git"
+
+          echo "===== PODFILE EXISTS ====="
+          ls Podfile 2>/dev/null || echo "NO Podfile"
+
+          echo "===== CARTFILE EXISTS ====="
+          ls Cartfile 2>/dev/null || echo "NO Cartfile"
+
+          echo "===== PACKAGE.JSON EXISTS ====="
+          ls package.json 2>/dev/null || echo "NO package.json"
+
+          echo "===== XCCONFIG FILES ====="
+          find . -name "*.xcconfig" | grep -v build | grep -v ".git"
+
+          echo "===== HEADER FILES (CDStructures) ====="
+          find . -name "CDStructures.h" | grep -v build
+
+          echo "===== BREW PACKAGES ====="
+          brew list | grep -E "carthage|cocoapods|node"
+
+          echo "===== CARTHAGE VERSION ====="
+          carthage version 2>/dev/null || echo "NO carthage"
+
+          echo "===== POD VERSION ====="
+          pod --version 2>/dev/null || echo "NO cocoapods"
