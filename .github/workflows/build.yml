@@ -14,7 +14,7 @@ jobs:
 
       - name: Build WDA Runner
         run: |
-          # Используем просто build, это создаст полноценное приложение
+          # Собираем полноценный таргет с принудительной линковкой всех либ
           xcodebuild build \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
@@ -22,18 +22,29 @@ jobs:
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_REQUIRED=NO \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
 
       - name: Package and Verify
         run: |
           mkdir -p Payload
-          # Ищем .app файл во всей папке build
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          
+          # Ищем .app файл (используем более широкий поиск на всякий случай)
+          APP_PATH=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           
           if [ -z "$APP_PATH" ]; then
             echo "❌ Ошибка: WebDriverAgentRunner-Runner.app не найден!"
             exit 1
           fi
+          
+          echo "✅ Найдено по пути: $APP_PATH"
+          
+          # Проверяем содержимое перед упаковкой (для отладки)
+          echo "--- Содержимое бандла ---"
+          ls -R "$APP_PATH"
+          echo "------------------------"
           
           cp -r "$APP_PATH" Payload/
           zip -rq WebDriverAgent.ipa Payload
@@ -43,7 +54,7 @@ jobs:
           echo "✅ IPA готов. Размер: ${SIZE}MB"
           
           if [ "$SIZE" -lt 15 ]; then
-            echo "❌ Ошибка: IPA слишком маленький (${SIZE}MB). Это пустышка!"
+            echo "❌ Ошибка: IPA слишком маленький (${SIZE}MB). Это всё еще пустышка!"
             exit 1
           fi
 
