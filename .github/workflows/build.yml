@@ -6,6 +6,11 @@ on:
 jobs:
   build-sign:
     runs-on: macos-14
+    env:
+      FASTLANE_USER: ${{ secrets.APPLE_ID }}
+      FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      FASTLANE_DONT_STORE_PASSWORD: "1"
+
     steps:
       - name: Checkout WDA
         uses: actions/checkout@v4
@@ -19,73 +24,63 @@ jobs:
       - name: Install npm deps
         run: cd WebDriverAgent && npm install
 
-      - name: Add Apple ID to keychain
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      - name: Install Fastlane
+        run: gem install fastlane --no-document -q
+
+      - name: Setup keychain
         run: |
-          # Create keychain
-          security create-keychain -p "build" build.keychain
+          security create-keychain -p "build123" build.keychain
           security default-keychain -s build.keychain
-          security unlock-keychain -p "build" build.keychain
+          security unlock-keychain -p "build123" build.keychain
           security set-keychain-settings -t 3600 -u build.keychain
 
-          # Add Apple ID credentials to keychain
-          xcrun altool --store-password-in-keychain-item "WDA_BUILD" \
-            -u "$APPLE_ID" -p "$APPLE_PASSWORD" 2>/dev/null || true
-
-      - name: Register device + get provisioning profile via Fastlane
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          FASTLANE_USER: ${{ secrets.APPLE_ID }}
-          FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      - name: Register device
         run: |
-          gem install fastlane --no-document -q
-
-          # Register iPhone
           fastlane run register_device \
             name:"iPhone12mini" \
-            udid:"00008101-001638D81468001E" \
-            username:"$APPLE_ID" \
-            password:"$APPLE_PASSWORD"
+            udid:"00008101-001638D81468001E"
 
-          # Get development cert
+      - name: Get certificate and profile
+        run: |
+          # Download development certificate
           fastlane cert development \
-            --username "$APPLE_ID" \
             --output_path "." \
-            --keychain_path "$(pwd)/build.keychain" \
-            --keychain_password "build"
+            --keychain_path "$HOME/Library/Keychains/build.keychain-db" \
+            --keychain_password "build123"
+
+          echo "=== Certs ==="
+          ls -la *.cer 2>/dev/null || echo "no cer"
+          echo "=== Identities ==="
+          security find-identity -v -p codesigning
 
           # Get provisioning profile
           fastlane sigh \
-            --username "$APPLE_ID" \
             --app_identifier "io.wda.runner" \
             --development \
             --output_path "." \
             --filename "WDA.mobileprovision"
 
-          echo "=== Certs ==="
-          ls -la *.cer 2>/dev/null || true
-          echo "=== Profiles ==="
-          ls -la *.mobileprovision 2>/dev/null || true
-          echo "=== Signing identities ==="
-          security find-identity -v -p codesigning build.keychain
+          echo "=== Profile ==="
+          ls -la WDA.mobileprovision 2>/dev/null || echo "no profile"
 
-      - name: Build and sign WDA
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
+      - name: Build WDA
         run: |
           cd WebDriverAgent
           mkdir -p Resources/WebDriverAgent.bundle
 
-          # Get signing identity
-          IDENTITY=$(security find-identity -v -p codesigning ~/../../build.keychain | grep "iPhone" | head -1 | awk -F'"' '{print $2}')
-          echo "Signing identity: $IDENTITY"
+          IDENTITY=$(security find-identity -v -p codesigning | grep "iPhone" | head -1 | awk -F'"' '{print $2}')
+          echo "Identity: $IDENTITY"
 
-          # Get provisioning profile UUID
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(security cms -D -i ~/../../WDA.mobileprovision 2>/dev/null) 2>/dev/null || echo "")
+          PROFILE_UUID=$(python3 -c "
+          import plistlib, subprocess
+          result = subprocess.run(['security', 'cms', '-D', '-i', '../WDA.mobileprovision'], capture_output=True)
+          data = plistlib.loads(result.stdout)
+          print(data['UUID'])
+          " 2>/dev/null || echo "")
           echo "Profile UUID: $PROFILE_UUID"
+
+          TEAM=$(security find-identity -v -p codesigning | grep "iPhone" | head -1 | grep -oE '\([A-Z0-9]{10}\)' | tr -d '()')
+          echo "Team: $TEAM"
 
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
@@ -94,9 +89,9 @@ jobs:
             -derivedDataPath ./build \
             CODE_SIGN_IDENTITY="$IDENTITY" \
             PROVISIONING_PROFILE="$PROFILE_UUID" \
+            DEVELOPMENT_TEAM="$TEAM" \
             CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES \
-            DEVELOPMENT_TEAM="$(echo $IDENTITY | grep -oE '\([A-Z0-9]+\)' | tr -d '()')"
+            CODE_SIGNING_ALLOWED=YES
 
       - name: Package IPA
         run: |
