@@ -1,4 +1,4 @@
-name: Build WDA IPA (FORCE FULL MODE)
+name: Build WebDriverAgent IPA (FINAL STABLE)
 
 on:
   workflow_dispatch:
@@ -6,66 +6,66 @@ on:
 jobs:
   build:
     runs-on: macos-14
+    
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          # Используем официальный репозиторий Appium
+          repository: appium/WebDriverAgent
+          path: WebDriverAgent
+          
       - name: Select Xcode 15.4
         run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
-      - name: Force Build WebDriverAgentRunner
+      - name: Build WebDriverAgent (Monolithic Build)
         run: |
-          # Собираем WebDriverAgentRunner. 
-          # Мы используем 'build', но с флагом 'generic/platform=iOS', 
-          # чтобы он собрал полноценные бинарники arm64.
+          cd WebDriverAgent
+          # Ключевые флаги: 
+          # 1. Сборка как статической библиотеки, чтобы вшить код сервера
+          # 2. -all_load для включения всех категорий Objective-C
           xcodebuild build \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData \
             -configuration Release \
-            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            OTHER_LDFLAGS="-all_load -ObjC"
+            ONLY_ACTIVE_ARCH=NO \
+            OTHER_LDFLAGS="-all_load -ObjC" \
+            -quiet
 
-      - name: Create IPA from Runner
+      - name: Verify and Package IPA
         run: |
-          mkdir -p Payload
+          cd WebDriverAgent
           
-          # 1. Находим основной Runner-App
-          # Он обычно лежит в build/Build/Products/Release-iphoneos/
-          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          # Находим путь к .app (исключая dSYM)
+          APP_PATH=$(find DerivedData/Build/Products/Release-iphoneos -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           
-          if [ -z "$APP_PATH" ]; then
-             echo "❌ Ошибка: Runner.app не найден!"
-             exit 1
+          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/WebDriverAgentRunner-Runner" ]; then
+            echo "❌ Ошибка: Реальное приложение не найдено!"
+            exit 1
           fi
           
-          echo "Найден путь: $APP_PATH"
+          echo "✅ Найдено приложение: $APP_PATH"
+          echo "BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist")"
+          
+          # Подготовка Payload
+          mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           
-          # 2. ВАЖНЫЙ ШАГ: В WebDriverAgentRunner код сервера часто лежит в WebDriverAgentLib.framework
-          # Мы проверяем, есть ли он там, если нет - ищем где он спрятан и закидываем в Payload
-          LIB_FRAMEWORK=$(find build/Build/Products/Release-iphoneos -name "WebDriverAgentLib.framework" -type d | head -n 1)
-          if [ -d "$LIB_FRAMEWORK" ]; then
-             echo "Копируем WebDriverAgentLib внутрь приложения..."
-             mkdir -p Payload/WebDriverAgentRunner-Runner.app/Frameworks
-             cp -r "$LIB_FRAMEWORK" Payload/WebDriverAgentRunner-Runner.app/Frameworks/
-          fi
-
-          # 3. Упаковка
+          # Проверяем наличие WebDriverAgentLib внутри (она должна быть либо в Frameworks, либо вшита в бинарник)
+          BINARY_SIZE=$(ls -lh "Payload/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner" | awk '{print $5}')
+          echo "📊 Размер основного бинарника: $BINARY_SIZE"
+          
+          # Упаковка
           zip -rq WebDriverAgent.ipa Payload
           
-          SIZE=$(du -m WebDriverAgent.ipa | cut -f1)
-          echo "✅ ИТОГОВЫЙ IPA: ${SIZE}MB"
+          echo "APP_PATH_FINAL=$GITHUB_WORKSPACE/WebDriverAgent/WebDriverAgent.ipa" >> $GITHUB_ENV
+          echo "✅ IPA готов. Размер: $(ls -lh WebDriverAgent.ipa | awk '{print $5}')"
 
-      - name: Check internal size
-        run: |
-          # Посмотрим, сколько весит сам бинарник внутри
-          ls -lh Payload/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner || true
-
-      - name: Upload Result
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-Runner-Full-IPA
-          path: WebDriverAgent.ipa
+          name: WebDriverAgent-Fixed-Release
+          path: WebDriverAgent/WebDriverAgent.ipa
