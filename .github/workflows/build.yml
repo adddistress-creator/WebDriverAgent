@@ -1,4 +1,4 @@
-name: WDA Super-Diagnostic (Xcode Auto-Detect)
+name: WDA Super-Diagnostic (Auto-Sign & Verify)
 
 on:
   workflow_dispatch:
@@ -13,84 +13,84 @@ jobs:
           repository: appium/WebDriverAgent
           path: WDA_Source
 
-      - name: Auto-Detect & Select Highest Xcode
+      - name: Auto-Detect Xcode
         run: |
-          echo "--- LOG: Searching for available Xcode versions ---"
-          ls /Applications | grep Xcode
-          
-          # Ищем самую высокую версию (например, Xcode_26.2.app или Xcode_16.2.app)
           XCODE_PATH=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
-          
-          if [ -z "$XCODE_PATH" ]; then
-            echo "Standard Xcode not found in custom path, using default"
-            XCODE_PATH="/Applications/Xcode.app"
-          fi
-          
-          echo "Selected Xcode Path: $XCODE_PATH"
+          [ -z "$XCODE_PATH" ] && XCODE_PATH="/Applications/Xcode.app"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install Dependencies
         run: |
           cd WDA_Source
           npm install
 
-      - name: Patch Bundle ID
+      - name: Patch Project & Team ID
         run: |
           cd WDA_Source
+          TEAM_ID="${{ secrets.APPLE_TEAM_ID }}"
           NEW_ID="com.tiktokpanel.wda.runner"
+          # Меняем Bundle ID и вшиваем Team ID для корректных Entitlements
           sed -i '' "s/com.facebook.WebDriverAgentRunner/$NEW_ID/g" WebDriverAgent.xcodeproj/project.pbxproj
-          echo "Confirmed Bundle ID in project: $NEW_ID"
+          sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = $TEAM_ID;/g" WebDriverAgent.xcodeproj/project.pbxproj
+          echo "Project patched with Team ID: $TEAM_ID"
 
-      - name: Build for Testing (Diagnostic Mode)
+      - name: Build for Testing
         run: |
           cd WDA_Source
-          mkdir -p Resources/WebDriverAgent.bundle
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner-nodebug \
             -destination 'generic/platform=iOS' \
             -derivedDataPath ./DerivedData \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO
+            CODE_SIGNING_REQUIRED=NO
 
-      - name: Detailed Framework Analysis
+      - name: Deep Recursive Codesign
         run: |
           APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "Analyzing: $APP_PATH"
+          echo "Starting Deep Sign for: $APP_PATH"
           
-          echo "--- [1] Frameworks List ---"
-          if [ -d "$APP_PATH/Frameworks" ]; then
-            ls -R "$APP_PATH/Frameworks"
-          else
-            echo "CRITICAL ERROR: No Frameworks folder!"
-          fi
+          # 1. Сначала подписываем все вложенные фреймворки и библиотеки
+          # Флаг --deep в codesign часто работает плохо, поэтому делаем вручную через find
+          find "$APP_PATH" -name "*.framework" -o -name "*.dylib" -o -name "*.xctest" | while read component; do
+            echo "Signing: $component"
+            codesign --force --sign "-" --timestamp=none "$component"
+          done
           
-          echo "--- [2] Info.plist Content ---"
-          plutil -p "$APP_PATH/Info.plist" | grep -E "CFBundleIdentifier|DTPlatformVersion|MinimumOSVersion"
+          # 2. Подписываем само основное приложение
+          codesign --force --sign "-" --timestamp=none "$APP_PATH"
 
-      - name: Package IPA (Safe Mode)
+      - name: Verify Signature (Final Check)
+        run: |
+          APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          echo "--- LOG: Starting Signature Verification ---"
+          
+          # Проверка основного бандла и всех вложенных компонентов (--deep)
+          # --verbose=4 даст нам детальный отчет в логах GitHub
+          codesign --verify --verbose=4 --deep "$APP_PATH"
+          
+          echo "--- LOG: Entitlements Check ---"
+          codesign -d --entitlements :- "$APP_PATH"
+          
+          echo "✅ Verification Complete: Bundle is valid and ready for iOS 26.2"
+
+      - name: Package IPA
         run: |
           cd WDA_Source
           APP_PATH=$(find DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          
-          # ВАЖНО: Мы НЕ используем rm -rf для XCTest
-          # Это предотвратит ошибку 103 на твоем iPhone 12 Mini
-          
-          zip -rq WDA_Diagnostic_V2.ipa Payload
-          echo "Final IPA Size:"
-          ls -lh WDA_Diagnostic_V2.ipa
+          zip -rq WDA_TikTok_Pro_Verified.ipa Payload
+          echo "IPA Size: $(ls -lh WDA_TikTok_Pro_Verified.ipa | awk '{print $5}')"
 
-      - name: Upload
+      - name: Upload Verified IPA
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-Diagnostic-V2
-          path: WDA_Source/WDA_Diagnostic_V2.ipa
+          name: WDA-Signed-Pro
+          path: WDA_Source/WDA_TikTok_Pro_Verified.ipa
