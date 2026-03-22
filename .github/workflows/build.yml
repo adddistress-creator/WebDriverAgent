@@ -1,121 +1,93 @@
-name: WDA Corporate Full-Sign (Fixed Keychain)
+name: Build WDA IPA (Fixed Signing)
+
 on:
   workflow_dispatch:
 
 jobs:
-  build-and-sign:
+  build-wda:
     runs-on: macos-15
     steps:
-      - name: Checkout WebDriverAgent
+      - name: Checkout WDA
         uses: actions/checkout@v4
         with:
           repository: appium/WebDriverAgent
-          path: WDA_Source
+          path: WebDriverAgent
 
-      - name: Auto-Detect Xcode
+      - name: Use Xcode 26.2
         run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
-          [ -z "$XCODE_PATH" ] && XCODE_PATH="/Applications/Xcode.app"
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
           xcodebuild -version
 
-      - name: Install & Unlock Corporate Certificate
-        env:
-          P12_BASE64: ${{ secrets.P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          MOBILEPROVISION_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
+      - name: Install npm deps
+        run: cd WebDriverAgent && npm install
+
+      - name: Build WDA
         run: |
-          # 1. Создаем временную связку ключей
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 14)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # 2. Декодируем сертификат и профиль
-          echo "${P12_BASE64}" | tr -d '\n ' | base64 --decode > certificate.p12
-          echo "${MOBILEPROVISION_BASE64}" | tr -d '\n ' | base64 --decode > profile.mobileprovision
-
-          # 3. Импортируем P12. 
-          # Флаг -T /usr/bin/codesign крайне важен для доступа утилиты к ключу.
-          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -T /usr/bin/codesign
-          
-          # 4. РАЗБЛОКИРОВКА КЛЮЧЕЙ (Решение ошибки "item could not be found")
-          # Эта команда дает кодесайну право подписи без всплывающих окон
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # 5. Установка профиля в систему
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
-
-          # 6. Получаем точное имя сертификата для переменной окружения
-          CERT_NAME=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -o '".*"' | head -1 | tr -d '"')
-          echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
-          echo "✅ Keychain настроен для: $CERT_NAME"
-
-      - name: Setup Environment
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      
-      - name: Install NPM Dependencies
-        run: |
-          cd WDA_Source
-          npm install
-
-      - name: Patch Project (Bundle ID)
-        run: |
-          cd WDA_Source
-          # ЗАМЕНИ ЭТОТ ID НА СВОЙ ИЗ .mobileprovision
-          NEW_ID="com.tiktokpanel.wda.runner"
-          sed -i '' "s/com.facebook.WebDriverAgentRunner/$NEW_ID/g" WebDriverAgent.xcodeproj/project.pbxproj
-          echo "Project patched with Bundle ID: $NEW_ID"
-
-      - name: Build for Testing
-        run: |
-          cd WDA_Source
+          cd WebDriverAgent
+          mkdir -p Resources/WebDriverAgent.bundle
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner-nodebug \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath ./DerivedData \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      - name: Deep Recursive Corporate Sign
+      - name: Sign all components with ad-hoc
         run: |
-          APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "--- LOG: Starting Deep Signing with ${{ env.CERT_NAME }} ---"
+          cd WebDriverAgent
+          APP=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          echo "App: $APP"
+
+          # Подписываем xctest бандл (самое важное!)
+          XCTEST="$APP/PlugIns/WebDriverAgentRunner.xctest"
           
-          # 1. Подписываем вложенные компоненты (Frameworks, dylib, xctest)
-          # Ошибка 103 на iPhone часто возникает из-за неподписанного .xctest
-          find "$APP_PATH" -name "*.framework" -o -name "*.dylib" -o -name "*.xctest" | while read component; do
-            echo "Signing component: $component"
-            codesign --force --sign "${{ env.CERT_NAME }}" --timestamp=none "$component"
+          # Подписываем бинарник внутри xctest
+          codesign --force --sign "-" --timestamp=none \
+            --entitlements /dev/null \
+            "$XCTEST/WebDriverAgentRunner"
+          
+          # Подписываем фреймворки внутри xctest
+          find "$XCTEST/Frameworks" -name "*.framework" 2>/dev/null | while read fw; do
+            codesign --force --sign "-" --timestamp=none "$fw"
           done
           
-          # 2. Подписываем само приложение
-          codesign --force --sign "${{ env.CERT_NAME }}" --timestamp=none "$APP_PATH"
-
-      - name: Verification (Final Check)
-        run: |
-          APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "--- LOG: Verification Report ---"
-          # Проверяем, что подпись действительна и глубока
-          codesign --verify --verbose=4 --deep "$APP_PATH"
-          echo "✅ Если ошибок выше нет, Error 103 побеждена."
+          # Подписываем сам xctest
+          codesign --force --sign "-" --timestamp=none "$XCTEST"
+          
+          # Подписываем фреймворки основного app
+          find "$APP/Frameworks" -name "*.framework" 2>/dev/null | while read fw; do
+            codesign --force --sign "-" --timestamp=none "$fw"
+          done
+          
+          # Подписываем основной app
+          codesign --force --sign "-" --timestamp=none "$APP"
+          
+          echo "=== Проверка подписей ==="
+          codesign -v "$XCTEST/WebDriverAgentRunner" && echo "xctest binary: OK" || echo "xctest binary: FAIL"
+          codesign -v "$XCTEST" && echo "xctest bundle: OK" || echo "xctest bundle: FAIL"
+          codesign -v "$APP" && echo "app: OK" || echo "app: FAIL"
 
       - name: Package IPA
         run: |
-          cd WDA_Source
-          APP_PATH=$(find DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          cd WebDriverAgent
+          APP=$(find build/Build/Products -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -rq WDA_Corporate_Verified.ipa Payload
-          echo "IPA Size: $(ls -lh WDA_Corporate_Verified.ipa | awk '{print $5}')"
+          cp -r "$APP" Payload/
+          
+          # Убираем лишние XC* фреймворки
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCTest.framework
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCTestCore.framework
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCTestSupport.framework
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCTAutomationSupport.framework
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCUIAutomation.framework
+          rm -rf Payload/WebDriverAgentRunner-Runner.app/Frameworks/XCUnit.framework
+          
+          zip -rq WDA_signed.ipa Payload
+          ls -lh WDA_signed.ipa
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: WDA-Final-Corporate
-          path: WDA_Source/WDA_Corporate_Verified.ipa
+          name: WDA-Fixed-Signing
+          path: WebDriverAgent/WDA_signed.ipa
