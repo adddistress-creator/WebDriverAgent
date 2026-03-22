@@ -1,4 +1,4 @@
-name: WDA Corporate Deep-Sign & Verify
+name: WDA Corporate Deep-Sign (Fixed Import)
 on:
   workflow_dispatch:
 
@@ -12,58 +12,56 @@ jobs:
           repository: appium/WebDriverAgent
           path: WDA_Source
 
-      - name: Auto-Detect Xcode (from old version)
+      - name: Auto-Detect Xcode
         run: |
           XCODE_PATH=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
           [ -z "$XCODE_PATH" ] && XCODE_PATH="/Applications/Xcode.app"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
 
-- name: Install Corporate Certificate
+      - name: Install Corporate Certificate
         env:
           P12_BASE64: ${{ secrets.P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           MOBILEPROVISION_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
         run: |
-          # 1. Подготовка путей
+          # 1. Создание временной связки ключей
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 14)
-          
-          # 2. Создание Keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # 3. Декодирование (используем -i чтобы игнорировать переносы строк)
-          echo "$P12_BASE64" | base64 --decode -i > certificate.p12
-          echo "$MOBILEPROVISION_BASE64" | base64 --decode -i > profile.mobileprovision
+          # 2. Очистка и декодирование Base64 (игнорируем мусорные символы)
+          echo "${P12_BASE64}" | tr -d '\n ' | base64 --decode > certificate.p12
+          echo "${MOBILEPROVISION_BASE64}" | tr -d '\n ' | base64 --decode > profile.mobileprovision
 
-          # 4. Импорт с расширенной диагностикой
-          # Если здесь упадет - значит пароль точно не NovaCerts
+          # 3. Импорт P12 с флагами доверия
+          # Флаг -A разрешает доступ всем приложениям (чтобы codesign не просил пароль)
           security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12
           
-          # 5. Настройка прав
+          # 4. Настройка разрешений для работы в фоне
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # 6. Установка профиля в систему
+          # 5. Установка Provisioning Profile
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
-          
-          # 7. Поиск ID сертификата
+
+          # 6. Поиск точного имени сертификата
           CERT_NAME=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -o '".*"' | head -1 | tr -d '"')
           if [ -z "$CERT_NAME" ]; then
-            echo "❌ ОШИБКА: Сертификат не найден в Keychain после импорта!"
+            echo "❌ ОШИБКА: Сертификат не найден после импорта!"
             exit 1
           fi
           echo "CERT_NAME=$CERT_NAME" >> $GITHUB_ENV
-          echo "✅ Сертификат успешно установлен: $CERT_NAME"
+          echo "✅ Успешно импортирован: $CERT_NAME"
 
-      - name: Setup Node.js & Dependencies
+      - name: Setup Environment
         uses: actions/setup-node@v4
         with:
           node-version: '22'
       
-      - name: Install NPM Deps
+      - name: Install Dependencies
         run: |
           cd WDA_Source
           npm install
@@ -71,7 +69,7 @@ jobs:
       - name: Patch Project (Bundle ID)
         run: |
           cd WDA_Source
-          # Укажи здесь ID, который прописан в твоем .mobileprovision
+          # ЗАМЕНИ ЭТОТ ID НА СВОЙ ИЗ ПРОФИЛЯ, ЕСЛИ ОН ОТЛИЧАЕТСЯ
           NEW_ID="com.tiktokpanel.wda.runner"
           sed -i '' "s/com.facebook.WebDriverAgentRunner/$NEW_ID/g" WebDriverAgent.xcodeproj/project.pbxproj
           echo "Project patched with Bundle ID: $NEW_ID"
@@ -90,29 +88,26 @@ jobs:
       - name: Deep Recursive Corporate Sign
         run: |
           APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "Starting Deep Sign with Certificate: ${{ env.CERT_NAME }}"
+          echo "--- LOG: Starting Deep Signing with ${{ env.CERT_NAME }} ---"
           
-          # 1. Подписываем вложенные компоненты (Frameworks, dylibs, xctest)
+          # 1. Подписываем все вложенные фреймворки, dylib и обязательно .xctest
+          # Это исправляет Error 103
           find "$APP_PATH" -name "*.framework" -o -name "*.dylib" -o -name "*.xctest" | while read component; do
             echo "Signing component: $component"
             codesign --force --sign "${{ env.CERT_NAME }}" --timestamp=none "$component"
           done
           
-          # 2. Подписываем основное приложение
+          # 2. Подписываем само основное приложение
           codesign --force --sign "${{ env.CERT_NAME }}" --timestamp=none "$APP_PATH"
 
-      - name: Final Verification (Check Error 103 Prevention)
+      - name: Verification (Final Check)
         run: |
           APP_PATH=$(find WDA_Source/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
-          echo "--- LOG: Starting Signature Verification ---"
-          
-          # Глубокая проверка всей структуры
+          echo "--- LOG: Verification Report ---"
           codesign --verify --verbose=4 --deep "$APP_PATH"
-          
-          echo "--- LOG: Entitlements Check ---"
+          echo "--- LOG: Entitlements ---"
           codesign -d --entitlements :- "$APP_PATH"
-          
-          echo "✅ Verification Complete. If no errors above, Error 103 is fixed."
+          echo "✅ Все проверки пройдены. IPA готов."
 
       - name: Package IPA
         run: |
